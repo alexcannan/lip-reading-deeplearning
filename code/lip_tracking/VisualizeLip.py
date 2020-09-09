@@ -31,7 +31,7 @@ PART2: Calling and defining required parameters for:
 """
 
 # Dlib requirements.
-predictor_path = 'dlib/shape_predictor_68_face_landmarks.dat'
+predictor_path = 'data/shape_predictor_68_face_landmarks.dat'
 detector = dlib.get_frontal_face_detector()
 predictor = dlib.shape_predictor(predictor_path)
 mouth_destination_path = os.path.dirname(args["output"]) + '/' + 'mouth'
@@ -49,7 +49,7 @@ print(num_frames, h, w, c)
 
 # The required parameters
 activation = []
-max_counter = 150
+max_counter = 600
 total_num_frames = int(video_shape[0])
 num_frames = min(total_num_frames,max_counter)
 counter = 0
@@ -62,6 +62,13 @@ writer = skvideo.io.FFmpegWriter(args["output"])
 # Required parameters for mouth extraction.
 width_crop_max = 0
 height_crop_max = 0
+
+# Mouth frame var declaration
+num_mouth_points = 20
+upper_lip_ind = [2,3,4,13,14,15]
+lower_lip_ind = [8,9,10,17,18,19]
+mouths = []
+mouth_arr_shape = (2, num_mouth_points)
 
 
 '''
@@ -94,8 +101,14 @@ for frame in reader.nextFrame():
     print('frame_shape:', frame.shape)
 
     # Process the video and extract the frames up to a certain number and then stop processing.
-    if counter > num_frames:
+    if counter >= num_frames:
         break
+
+    mouths.append({
+        "frame": counter,
+        "time": None,  # TODO: How to get timestamp of frame? Is fps constant?
+        "detected": False,
+    })
 
     # Detection of the frame
     frame.setflags(write=True)
@@ -103,9 +116,6 @@ for frame in reader.nextFrame():
 
     # 20 mark for mouth
     marks = np.zeros((2, 20))
-
-    # All unnormalized face features.
-    Features_Abnormal = np.zeros((190, 1))
 
     # If the face is detected.
     print(len(detections))
@@ -127,6 +137,18 @@ for frame in reader.nextFrame():
                 marks[0, co] = X.x
                 marks[1, co] = X.y
                 co += 1
+
+            # print(marks)
+            mouth_centroid = np.mean(marks, axis=1)
+            points = marks - mouth_centroid[:, np.newaxis]
+            mouths[counter]["points"] = points
+            mouths[counter]["detected"] = True
+            top_centroid = np.mean(np.take(points, upper_lip_ind, axis=1), axis=1)
+            btm_centroid = np.mean(np.take(points, lower_lip_ind, axis=1), axis=1)
+            lip_distance = np.linalg.norm(top_centroid-btm_centroid)
+            mouths[counter]["top_centroid"] = top_centroid
+            mouths[counter]["btm_centroid"] = btm_centroid
+            mouths[counter]["lip_distance"] = lip_distance
 
             # Get the extreme points(top-left & bottom-right)
             X_left, Y_left, X_right, Y_right = [int(np.amin(marks, axis=1)[0]), int(np.amin(marks, axis=1)[1]),
@@ -186,6 +208,12 @@ for frame in reader.nextFrame():
                 mouth_gray = cv2.cvtColor(mouth, cv2.COLOR_RGB2GRAY)
                 cv2.imwrite(mouth_destination_path + '/' + 'frame' + '_' + str(counter) + '.png', mouth_gray)
 
+                # Draw mouth markings
+                for ii in range(marks.shape[1]):
+                    x_pt = int(marks[0,ii])
+                    y_pt = int(marks[1,ii])
+                    frame[y_pt, x_pt] = [255,0,0]  # red
+
                 print("The cropped mouth is detected ...")
                 activation.append(1)
             else:
@@ -221,8 +249,80 @@ The python script for loading a list:
         my_list = pickle.load(f)
 """
 
-the_filename = os.path.dirname(args["output"]) + '/' + 'activation'
+the_filename = os.path.join(os.path.dirname(args["output"]), 'activation')
 my_list = activation
 with open(the_filename, 'wb') as f:
     pickle.dump(my_list, f)
 
+"""
+PART5: Normalize mouths and save video
+"""
+
+# Normalize mouths based on avg variance
+for i in range(len(mouths)):
+    if mouths[i]["detected"]:
+        var = np.mean(np.linalg.norm(mouths[i]["points"], axis=0))
+        mouths[i]["variance"] = var
+mean_var = np.mean([x["variance"] for x in mouths if x["detected"]])
+mean_var = 50  # This can be changed to increase resolution of output
+for i in range(len(mouths)):
+    if mouths[i]["detected"]:
+        mouths[i]["points"] *= mean_var / mouths[i]["variance"]
+
+extreme_buffer = 25
+mouths_points = np.stack([x["points"] for x in mouths if x["detected"]])
+min_x = np.min(mouths_points[:,0,:]) - extreme_buffer
+max_x = np.max(mouths_points[:,0,:]) + extreme_buffer
+min_y = np.min(mouths_points[:,1,:]) - extreme_buffer
+max_y = np.max(mouths_points[:,1,:]) + extreme_buffer
+norm_frame_shape = (int(np.round(max_y-min_y)), int(np.round(max_x-min_x)), 3)
+
+points_offset = np.array([[(max_x-min_x)/2], [(max_y-min_y)/2]])
+print(points_offset.shape)
+print(points_offset)
+for i in range(len(mouths)):
+    if mouths[i]["detected"]:
+        mouths[i]["points"] += np.tile(points_offset, (1, num_mouth_points))
+        mouths[i]["points"] = np.round(mouths[i]["points"]).astype(int)
+        mouths[i]["top_centroid"] += points_offset.flatten()
+        mouths[i]["top_centroid"] = np.round(mouths[i]["top_centroid"]).astype(int)
+        mouths[i]["btm_centroid"] += points_offset.flatten()
+        mouths[i]["btm_centroid"] = np.round(mouths[i]["btm_centroid"]).astype(int)
+
+colors = [
+    [230,25,75],
+    [60,180,75],
+    [255,225,25],
+    [0,130,200],
+    [245,130,48],
+    [145,30,180],
+    [70,240,240],
+    [240,50,230],
+    [210,245,60],
+    [250,190,212],
+    [0,128,128],
+    [220,190,255],
+    [170,110,40],
+    [255,250,200],
+    [128,0,0],
+    [170,255,195],
+    [128,128,0],
+    [255,215,180],
+    [0,0,128],
+    [128,128,128],
+]
+
+norm_mouth_path = os.path.join(os.path.dirname(args["output"]), "norm_mouth.mp4")
+writer = skvideo.io.FFmpegWriter(norm_mouth_path)
+for i, mouth in enumerate(mouths):
+    frame = np.zeros(norm_frame_shape, dtype=np.uint8)
+    if mouth["detected"]:
+        for ii in range(mouth["points"].shape[1]):
+            frame[mouth["points"][1, ii], mouth["points"][0, ii]] = colors[ii]
+        cv2.line(frame,
+                 tuple(mouth["top_centroid"]),
+                 tuple(mouth["btm_centroid"]),
+                 [0, 128, 200],
+                 1)
+    writer.writeFrame(frame)
+writer.close()
